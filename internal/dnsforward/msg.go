@@ -143,6 +143,11 @@ func (s *Server) genForBlockingMode(
 		return s.NewMsgNXDOMAIN(req)
 	case filtering.BlockingModeREFUSED:
 		return s.makeResponseREFUSED(req)
+	case filtering.BlockingModeStrong:
+		// Respond with an empty answer so that the clients fail right away,
+		// and let the SNI filter reset the TLS connections that don't use the
+		// DNS of AdGuard Home at all.
+		return s.NewMsgNODATA(req)
 	default:
 		s.logger.ErrorContext(ctx, "invalid blocking mode", "mode", mode)
 

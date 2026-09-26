@@ -172,6 +172,7 @@ export const BLOCKING_MODES = {
     nxdomain: 'nxdomain',
     null_ip: 'null_ip',
     custom_ip: 'custom_ip',
+    strong: 'strong',
 };
 
 // Note that translation strings contain these modes (theme_CONSTANT)
@@ -209,6 +210,8 @@ export const FILTERED_STATUS = {
     REWRITE_RULE: 'RewriteRule',
     FILTERED_SAFE_BROWSING: 'FilteredSafeBrowsing',
     FILTERED_PARENTAL: 'FilteredParental',
+    FILTERED_SNI: 'FilteredSNI',
+    NOT_FILTERED_SNI: 'NotFilteredSNI',
 };
 
 export const RESPONSE_FILTER = {
@@ -273,6 +276,14 @@ export const FILTERED_STATUS_TO_META_MAP = {
     [FILTERED_STATUS.FILTERED_BLACK_LIST]: {
         LABEL: RESPONSE_FILTER.BLOCKED.LABEL,
         COLOR: QUERY_STATUS_COLORS.RED,
+    },
+    [FILTERED_STATUS.FILTERED_SNI]: {
+        LABEL: 'blocked_by_sni',
+        COLOR: QUERY_STATUS_COLORS.RED,
+    },
+    [FILTERED_STATUS.NOT_FILTERED_SNI]: {
+        LABEL: 'allowed_by_sni',
+        COLOR: QUERY_STATUS_COLORS.WHITE,
     },
     [FILTERED_STATUS.REWRITE]: {
         LABEL: RESPONSE_FILTER.REWRITTEN.LABEL,

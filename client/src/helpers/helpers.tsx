@@ -440,7 +440,8 @@ export const getParamsForClientsSearch = (data: any, param: any, additionalParam
 export const checkFiltered = (reason: any) => reason.indexOf(FILTERED) === 0;
 export const checkRewrite = (reason: any) => reason === FILTERED_STATUS.REWRITE;
 export const checkRewriteHosts = (reason: any) => reason === FILTERED_STATUS.REWRITE_HOSTS;
-export const checkBlackList = (reason: any) => reason === FILTERED_STATUS.FILTERED_BLACK_LIST;
+export const checkBlackList = (reason: any) =>
+    reason === FILTERED_STATUS.FILTERED_BLACK_LIST || reason === FILTERED_STATUS.FILTERED_SNI;
 export const checkWhiteList = (reason: any) => reason === FILTERED_STATUS.NOT_FILTERED_WHITE_LIST;
 // eslint-disable-next-line max-len
 export const checkNotFilteredNotFound = (reason: any) => reason === FILTERED_STATUS.NOT_FILTERED_NOT_FOUND;

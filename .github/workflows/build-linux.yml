@@ -7,8 +7,9 @@ name: Lint, test, and build Linux binaries
 #   dist/AdGuardHome_linux_amd64.tar.gz  — x86_64
 #   dist/AdGuardHome_linux_arm64.tar.gz  — arm64
 #
-# Run it manually from the Actions tab, or push a tag such as v2026-09-23 to
-# also publish a GitHub release with the archives attached.  See
+# Run it manually from the Actions tab, push a tag such as v2026-09-23 to also
+# publish a GitHub release with the archives attached, or open a pull request
+# against the default branch to get the archives as build artifacts.  See
 # scripts/make/version.sh for the version format.
 #
 # NOTE: The frontend is embedded into the Go binary, so it is built first.
@@ -22,6 +23,13 @@ on:
       - main
     tags:
       - 'v*'
+  # Pull requests are checked and built as well, so that a branch can be tested
+  # on a device without building it locally.  The release steps below only run
+  # for tags, so nothing is published from a pull request.
+  pull_request:
+    branches:
+      - master
+      - main
   workflow_dispatch:
 
 # Publishing a release requires a writable GITHUB_TOKEN.

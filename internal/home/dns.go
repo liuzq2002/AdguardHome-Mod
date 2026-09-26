@@ -20,6 +20,7 @@ import (
 	"github.com/AdguardTeam/AdGuardHome/internal/dnsforward"
 	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/AdGuardHome/internal/querylog"
+	"github.com/AdguardTeam/AdGuardHome/internal/snifilter"
 	"github.com/AdguardTeam/AdGuardHome/internal/stats"
 	"github.com/AdguardTeam/dnscrypt"
 	"github.com/AdguardTeam/golibs/errors"
@@ -133,7 +134,111 @@ func initDNS(
 		mux.Handle(route, globalContext.dnsServer)
 	}
 
+	// The SNI filtering is started after the DNS server, since it's also
+	// started and stopped when the blocking mode changes.
+	syncSNIFilter(ctx, baseLogger)
+
 	return nil
+}
+
+// sniFilterActive returns true if the SNI filtering must be running right now.
+// It's required by the sni_filter configuration section, or by the strong
+// blocking mode, which resets the TLS connections as well.
+func sniFilterActive() (ok bool) {
+	if config.SNIFilter.Enabled {
+		return true
+	}
+
+	if filters := globalContext.filters; filters != nil {
+		mode, _, _ := filters.BlockingMode()
+
+		return mode == filtering.BlockingModeStrong
+	}
+
+	return false
+}
+
+// syncSNIFilter starts or stops the SNI filtering module according to the
+// current configuration.  It's called on startup and after every change of the
+// configuration.  The switch is dynamic, so the strong blocking mode doesn't
+// require a restart.  l must not be nil.
+func syncSNIFilter(ctx context.Context, l *slog.Logger) {
+	if globalContext.filters == nil || globalContext.dnsServer == nil {
+		// Either the modules aren't initialized yet, or the server is already
+		// stopped, in which case the filter must not be started again.
+		return
+	}
+
+	globalContext.sniLock.Lock()
+	defer globalContext.sniLock.Unlock()
+
+	if !sniFilterActive() {
+		closeSNIFilterLocked(ctx, l)
+
+		return
+	}
+
+	if globalContext.sniFilter != nil {
+		return
+	}
+
+	err := startSNIFilterLocked(ctx, l, globalContext.filters)
+	if err != nil {
+		// The SNI filtering is an optional feature that requires the root
+		// rights and the netfilter support, so its failure must not stop the
+		// rest of the server.
+		l.ErrorContext(ctx, "starting the sni filter", slogutil.KeyError, err)
+	}
+}
+
+// startSNIFilterLocked initializes and starts the SNI filtering module.
+// globalContext.sniLock must be held.  l and dnsFilter must not be nil.
+func startSNIFilterLocked(
+	ctx context.Context,
+	l *slog.Logger,
+	dnsFilter *filtering.DNSFilter,
+) (err error) {
+	sni, err := snifilter.New(&snifilter.Config{
+		Logger:   l.With(slogutil.KeyPrefix, "snifilter"),
+		Filter:   dnsFilter,
+		QueryLog: globalContext.queryLog,
+		Params:   config.SNIFilter,
+	})
+	if err != nil {
+		// Don't wrap the error, because it's informative enough as is.
+		return err
+	}
+
+	err = sni.Start(ctx)
+	if err != nil {
+		return fmt.Errorf("starting: %w", err)
+	}
+
+	globalContext.sniFilter = sni
+
+	return nil
+}
+
+// closeSNIFilter stops the SNI filtering module, if it's running.  l must not
+// be nil.  It's safe to call it several times.
+func closeSNIFilter(ctx context.Context, l *slog.Logger) {
+	globalContext.sniLock.Lock()
+	defer globalContext.sniLock.Unlock()
+
+	closeSNIFilterLocked(ctx, l)
+}
+
+// closeSNIFilterLocked stops the SNI filtering module, if it's running.
+// globalContext.sniLock must be held.  l must not be nil.
+func closeSNIFilterLocked(ctx context.Context, l *slog.Logger) {
+	if globalContext.sniFilter == nil {
+		return
+	}
+
+	globalContext.sniFilter.Shutdown(ctx)
+	globalContext.sniFilter = nil
+
+	l.DebugContext(ctx, "sni filter is closed")
 }
 
 // initDNSServer initializes the [context.dnsServer].  To only use the internal
@@ -479,6 +584,8 @@ func startDNSServer(ctx context.Context) (err error) {
 // stopDNSServer stops the DNS server and closes all the DNS modules.  l must
 // not be nil.
 func stopDNSServer(ctx context.Context, l *slog.Logger) (err error) {
+	closeSNIFilter(ctx, l)
+
 	if !isRunning() {
 		return nil
 	}
@@ -501,6 +608,8 @@ func stopDNSServer(ctx context.Context, l *slog.Logger) (err error) {
 // closeDNSServer closes the DNS server and the modules it depends on.  l must
 // not be nil.
 func closeDNSServer(ctx context.Context, l *slog.Logger) {
+	closeSNIFilter(ctx, l)
+
 	// DNS forward module must be closed BEFORE stats or queryLog because it depends on them
 	if globalContext.dnsServer != nil {
 		globalContext.dnsServer.Close(ctx)

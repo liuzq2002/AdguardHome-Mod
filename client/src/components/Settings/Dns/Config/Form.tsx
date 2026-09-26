@@ -68,9 +68,13 @@ const Form = ({ processing, initialValues, onSubmit }: Props) => {
             value: BLOCKING_MODES.default,
             label: t('default'),
         },
+        {
+            value: BLOCKING_MODES.strong,
+            label: t('strong'),
+        },
     ];
 
-    const blockingModeDescriptions = [t('blocking_mode_default')];
+    const blockingModeDescriptions = [t('blocking_mode_default'), t('blocking_mode_strong')];
 
     const edns_cs_enabled = watch('edns_cs_enabled');
     const edns_cs_use_custom = watch('edns_cs_use_custom');

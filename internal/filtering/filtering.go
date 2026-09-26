@@ -192,6 +192,12 @@ const (
 
 	// BlockingModeREFUSED means respond with the REFUSED code.
 	BlockingModeREFUSED BlockingMode = "refused"
+
+	// BlockingModeStrong means respond with an empty NODATA response, and,
+	// additionally, reset the TLS connections to the blocked hosts by their
+	// SNI values.  It's a mod-only mode, see the sni_filter configuration
+	// section.
+	BlockingModeStrong BlockingMode = "strong"
 )
 
 // LookupStats store stats collected during safebrowsing or parental checks

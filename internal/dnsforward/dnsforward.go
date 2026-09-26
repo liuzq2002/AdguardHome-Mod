@@ -688,7 +688,8 @@ func validateBlockingMode(
 		filtering.BlockingModeDefault,
 		filtering.BlockingModeNXDOMAIN,
 		filtering.BlockingModeREFUSED,
-		filtering.BlockingModeNullIP:
+		filtering.BlockingModeNullIP,
+		filtering.BlockingModeStrong:
 		return nil
 	case filtering.BlockingModeCustomIP:
 		if !blockingIPv4.Is4() {

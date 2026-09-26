@@ -33,6 +33,7 @@ import (
 	"github.com/AdguardTeam/AdGuardHome/internal/filtering/hashprefix"
 	"github.com/AdguardTeam/AdGuardHome/internal/permcheck"
 	"github.com/AdguardTeam/AdGuardHome/internal/querylog"
+	"github.com/AdguardTeam/AdGuardHome/internal/snifilter"
 	"github.com/AdguardTeam/AdGuardHome/internal/stats"
 	"github.com/AdguardTeam/AdGuardHome/internal/updater"
 	"github.com/AdguardTeam/AdGuardHome/internal/version"
@@ -59,6 +60,12 @@ type homeContext struct {
 	dnsServer *dnsforward.Server // DNS module
 
 	filters *filtering.DNSFilter // DNS filtering module
+
+	sniFilter *snifilter.Filter // SNI filtering module
+
+	// sniLock protects sniFilter, which is started and stopped both on
+	// startup and on configuration changes.
+	sniLock sync.Mutex
 
 	controlLock sync.Mutex
 }

@@ -42,7 +42,8 @@ const ResponseCell = ({
 
     const formattedElapsedMs = formatElapsedMs(elapsedMs, t);
 
-    const isBlocked = reason === FILTERED_STATUS.FILTERED_BLACK_LIST;
+    const isBlocked =
+        reason === FILTERED_STATUS.FILTERED_BLACK_LIST || reason === FILTERED_STATUS.FILTERED_SNI;
 
     const isBlockedByResponse = originalResponse.length > 0 && isBlocked;
 
@@ -98,6 +99,7 @@ const ResponseCell = ({
     const getDetailedInfo = (reason: any) => {
         switch (reason) {
             case FILTERED_STATUS.FILTERED_BLACK_LIST:
+            case FILTERED_STATUS.FILTERED_SNI:
             case FILTERED_STATUS.NOT_FILTERED_WHITE_LIST:
                 return getFilterNames(rules, filters, whitelistFilters).join(', ');
             default:

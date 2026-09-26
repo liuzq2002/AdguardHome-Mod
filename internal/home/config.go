@@ -21,6 +21,7 @@ import (
 	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/AdGuardHome/internal/filtering/rulelist"
 	"github.com/AdguardTeam/AdGuardHome/internal/querylog"
+	"github.com/AdguardTeam/AdGuardHome/internal/snifilter"
 	"github.com/AdguardTeam/AdGuardHome/internal/stats"
 	"github.com/AdguardTeam/dnsproxy/fastip"
 	"github.com/AdguardTeam/golibs/errors"
@@ -117,6 +118,10 @@ type configuration struct {
 	UserRules        []string               `yaml:"user_rules"`
 
 	Filtering *filtering.Config `yaml:"filtering"`
+
+	// SNIFilter is the configuration of the blocking of TLS connections by
+	// their SNI values.  It's only supported on Linux.
+	SNIFilter snifilter.Params `yaml:"sni_filter"`
 
 	// Clients contains the YAML representations of the persistent clients.
 	// This field is only used for reading and writing persistent client data.
@@ -384,6 +389,11 @@ const (
 	defaultParentalBlockHost     = "family-block.dns.adguard.com"
 )
 
+// defaultSNIQueueNum is the default number of the NFQUEUE queue used to
+// inspect the TLS connections.  It must not be zero, as the zero queue is
+// often used by other software.
+const defaultSNIQueueNum uint16 = 7
+
 // config is the global configuration structure.
 //
 // TODO(a.garipov, e.burkov): This global is awful and must be removed.
@@ -513,6 +523,14 @@ var config = &configuration{
 			RDNS:      true,
 			HostsFile: true,
 		},
+	},
+	SNIFilter: snifilter.Params{
+		Enabled:     false,
+		QueueNum:    defaultSNIQueueNum,
+		Ports:       []uint16{443, 8443},
+		UIDs:        []string{},
+		DropQUIC:    false,
+		ManageRules: true,
 	},
 	OSConfig:      &osConfig{},
 	SchemaVersion: configmigrate.LastSchemaVersion,
@@ -715,6 +733,11 @@ func validateConfig(ctx context.Context, l *slog.Logger, fileData []byte) (err e
 		config.Filtering.FiltersUpdateIntervalHours = 24
 	}
 
+	err = config.SNIFilter.Validate()
+	if err != nil {
+		return fmt.Errorf("validating the sni filter: %w", err)
+	}
+
 	if len(config.Users) == 0 {
 		l.WarnContext(ctx, "no users in the configuration file; authentication is disabled")
 	}
@@ -906,6 +929,10 @@ func (cm *defaultConfigModifier) Apply(ctx context.Context) {
 	if err != nil {
 		cm.logger.ErrorContext(ctx, "writing config", slogutil.KeyError, err)
 	}
+
+	// The SNI filtering follows both the sni_filter section and the blocking
+	// mode, so it has to be started or stopped along with them.
+	syncSNIFilter(ctx, cm.logger)
 }
 
 // setAuth sets the auth parameters used by Apply.

@@ -75,6 +75,77 @@ gh release delete v2026-09-24 --repo herta0426/AdguardHome-Mod --cleanup-tag --y
 2. 想一想仓库外有没有人调用（管理器、脚本、模块安装脚本）。仓库外的调用方 grep 不到，所以对**接口**要保守。
 3. 真要删接口，就补一层「接口在、功能不生效」的兼容层：在 `internal/filtering/` 里新增 handler（状态永远返回未启用或空列表，写请求校验后丢弃），在 `RegisterFilteringHandlers` 注册；`/stats` 与 `/clients` 补回字段即可。这类兼容层大约百来行，加上文档和测试，半天能搞定。
 
+### 2.6 自己加的功能：SNI 阻断（`sni_filter`）
+
+这是本项目第一个「不只是做减法」的功能，默认关闭，只在 Linux 上生效。
+
+**解决什么问题。** DNS 过滤看不到两类流量：应用自己走 DoH（443 端口，绕开系统 DNS），以及把 IP 写死在代码里的 Ad SDK。这两种连接的 ClientHello 里 SNI 是明文，所以能在连接建立时按域名拦掉，用的是**同一套过滤规则**，不需要另外维护清单。
+
+**机制。**
+
+1. 在 `filter` 表的 `OUTPUT` 链上挂自己的链 `AGH_SNI`：链首放行 loopback，然后 `-p tcp -m multiport --dports <ports> -m connbytes --connbytes 0:20000 --connbytes-dir original --connbytes-mode bytes -j NFQUEUE --queue-num <n> --queue-bypass`。`connbytes` 让每条连接只有开头 20 KB 进用户态，其余由内核直通；`--queue-bypass` 保证没人读队列时包照常走（AdGuardHome 挂了只是不拦广告，不会断网）。
+2. 用户态按连接拼 TCP 载荷，用 `internal/snifilter/clienthello.go` 解析出 SNI（处理跨 TLS record、跨 TCP 段），再把 SNI 和判决结果写进查询日志，见下面「SNI 走查询日志」一条。
+3. 拿 SNI 问 AGH 自己的规则引擎：`filtering.DNSFilter.CheckHostRules(host, dns.TypeA, setts)`；命中就把这条连接记成「拦截」。
+4. 命中时返回 `NF_DROP`，同时用 `AF_INET/AF_INET6 + IPPROTO_RAW` 裸套接字注入两个 TCP RST：一个以「服务器」身份发给客户端（客户端立刻拿到 `ECONNRESET`，不是干等超时），一个以「客户端」身份发给服务器（顺手收掉服务端的半开连接）。之后这条连接的包继续 DROP。
+
+**强力模式。** `filtering.blocking_mode: strong`（DNS 设置页里叫「强力模式」）把上面这套和 DNS 拦截合成一个开关：
+
+- DNS 半边在 `internal/dnsforward/msg.go` 的 `genForBlockingMode` 里加了一个分支，直接调已有的 `NewMsgNODATA`，也就是 NOERROR + 空 answer + SOA。A/AAAA/HTTPS 走这个分支，其它 qtype 本来就走 NODATA。
+- SNI 半边由 `internal/home/dns.go` 的 `syncSNIFilter` 负责：只要 `sni_filter.enabled` 为真**或**当前拦截模式是 strong，就确保 SNI 过滤在跑，否则确保它停掉。`config.Filtering` 的拦截模式是运行时可变的值，所以判断要读 `globalContext.filters.BlockingMode()`，不要读 `config.Filtering.BlockingMode`。
+- `syncSNIFilter` 在两个地方被调用：`initDNS` 末尾（启动）和 `defaultConfigModifier.Apply`（每次配置写盘后，`/control/dns_config` 会走到这里）。所以「在界面里切成强力模式」不需要重启，DNS 半边立即生效、RST 半边在保存配置时同步启停。
+- 启动/停止的临界区由 `homeContext.sniLock` 保护；`syncSNIFilter` 在 `globalContext.filters` 或 `globalContext.dnsServer` 为空时直接返回，避免在关机过程中把规则又装回去。
+
+**为什么不用 TUN、也不让内核自己发 RST**（都实测过，见 [TUN.md](TUN.md) 第 8、12、13、14 节）：
+
+- TUN 要抢默认路由，和代理模块的 TUN 零和；NFQUEUE 在 `OUTPUT` 上看一眼就放行，放行的包完全走内核原路径。
+- 让内核自己发 RST 的两条路都试过、都不行：`SetVerdictWithConnMark(NF_DROP)` 设的 conntrack mark 在 iptables-nft 上不被后面的 `-m connmark` 看到；`NF_REPEAT` + packet mark 也不会重跑链。所以 RST 由 AGH 自己注入。
+- 顺带一个坑：「内核 REJECT + connmark」的规则必须显式带 `-p tcp`，否则 `--reject-with tcp-reset` 报 `Invalid argument`（REJECT 也只能用在 filter 表）。
+
+**代码位置。**
+
+| 文件 | 干什么 |
+| --- | --- |
+| `internal/snifilter/snifilter.go` | 配置校验、连接表、判决（平台无关） |
+| `internal/snifilter/clienthello.go` | ClientHello / SNI 解析 |
+| `internal/snifilter/firewall_linux.go` | iptables/ip6tables 规则、NFQUEUE 消费、RST 注入、规则自愈 |
+| `internal/snifilter/firewall_others.go` | 非 Linux 的平台桩 |
+| `internal/home/{config.go,dns.go,home.go}` | `sni_filter` 配置段与生命周期（`initDNS` 启动、`Apply` 同步、`stopDNSServer`/`closeDNSServer` 关闭） |
+| `internal/dnsforward/msg.go`、`internal/dnsforward/dnsforward.go` | 强力模式的 NODATA 响应与模式校验 |
+| `client/src/components/Settings/Dns/Config/Form.tsx`、`client/src/helpers/constants.ts` | 拦截模式的两个选项（默认 / 强力模式） |
+
+**配置**（细节见 `doc/AdGuardHome.yaml.example`）：
+
+```yaml
+sni_filter:
+  enabled: false
+  queue_num: 7          # 别用 0
+  ports: [443, 8443]
+  uids: []              # 例如 ["10000-19999"]，空表示所有进程
+  drop_quic: false      # 打开则 REJECT UDP 443，逼 HTTP/3 回退 TCP
+  manage_rules: true    # false = 规则交给外部脚本装（见下）
+```
+
+`filtering.blocking_mode: strong` 时上面这一段自动生效，不需要把 `enabled` 打开。
+
+**规则可以搬给外部脚本**（`manage_rules: false`）：AdGuardHome 只开 NFQUEUE、读包、发 RST，不再安装/清理/自愈 iptables 规则。Magisk 模块走的就是这条：`scripts/iptables.sh` 维护 `filter` 表里的 `AGH_SNI` 链（`-o lo -j RETURN` + `-p tcp --dports … -m owner --uid-owner … -m connbytes … -j NFQUEUE --queue-num N --queue-bypass`，v4/v6 各一份），5 秒守护循环里用 `-C` 检查、缺了就重建；队列号从 `AdGuardHome.yaml` 的 `sni_filter.queue_num` 读，避免两边写死不同值。这种模式下 `ports`/`uids`/`drop_quic` 由脚本说了算，配置里那三项不生效。
+
+外部规则的硬要求：**必须带 `--queue-bypass`**，否则 AdGuardHome 没在跑时进队列的包没人判决，443 会整段卡住；链名建议沿用 `AGH_SNI`（AGH 侧的启动日志和文档都用这个名字）。
+
+**验证怎么做。** 规则里排除了 loopback，所以本机 127.0.0.1 上的测试服务器测不到，必须让流量真的过一张网卡。Linux 上的做法是 network namespace + veth，把 TLS 服务器放进去，客户端从宿主机连 `10.99.0.2:443`：规则里放 `||blocked.test^` 时，`sni=blocked.test` 应立刻收到 RST，`sni=allowed.test` 应正常握手。
+
+2026-09-26 已在 WSL2（内核 6.18，iptables-nft）上跑过：IPv4/IPv6 都被 RST（11 ms / 1.7 ms），放行的连接正常（6 ms），手工 `iptables -D OUTPUT -j AGH_SNI` 后 30 秒内规则自动恢复，SIGTERM 后 v4/v6 的链与跳转都清干净；`drop_quic: true` 时 v4/v6 分别生成 `icmp-port-unreachable` 与 `icmp6-port-unreachable` 的 REJECT 规则。
+
+**已知限制与坑。**
+
+- 内核必须支持 `xt_connbytes` 与 `NFQUEUE`（nft 后端也行）。厂商内核可能裁剪，真机上先跑一条 `iptables -t filter -I OUTPUT -p tcp --dport 443 -j NFQUEUE --queue-num 7 --queue-bypass` 验证。
+- 注入的 RST 源地址是远端 IP，靠本机 IP 栈绕回本地 socket；`net.ipv4.conf.*.rp_filter` 若是**严格模式（1）**，这个包会被丢掉，效果退化成「连接一直挂着」（仍然拦截，只是慢）。部分 ROM 要留意。
+- HTTP/3（QUIC）的 SNI 是加密的，拦不到，只能 `drop_quic: true` 逼回退 TCP。ECH 普及后这条路也会静默失效。
+- 只看进程 UID、不看客户端 IP：手机上的应用都在同一台机器上，所以**按客户端区分的过滤规则在 SNI 层不生效**，只按全局规则判定（`setts.ProtectionEnabled` 恒为真）。
+- **SNI 走查询日志，不走主日志**：每条解析出 SNI 的连接都会写进查询日志（`internal/snifilter/snifilter.go` 的 `logConnection`），域名就是 SNI。原因换成 SNI 专用的两个值，好把 TLS 连接与 DNS 请求分开：被拦的是 `filtering.FilteredSNI`（界面显示「已阻止（SNI）」，仍归入「已阻止」筛选），放行的是 `filtering.NotFilteredSNI`（显示「已处理（SNI）」）——过滤引擎给的原因不再写进查询日志，但命中的规则照旧带上，所以「命中允许规则」的连接改看规则列而不是「允许项」筛选。主日志只在启动/停止、出错误的时候写，不再逐条打印连接；RST 发不出去也只记 debug。
+- 查询日志里记的是**每条连接**（放行的也记），手机上流量大时会把查询日志刷得比较快，日志轮转要不要调（`querylog.mem_size` / `interval`）按实际用量定。
+- 队列号默认 7，和别的 NFQUEUE 使用者撞车时改 `queue_num`。
+- **`Filter.Start` 必须把传入的 ctx 用 `context.WithoutCancel` 脱钩**：运行时切换拦截模式时，启动请求来自 `/control/dns_config` 的 HTTP 请求，响应一写完请求 ctx 就被取消，NFQUEUE 的读取循环和规则自愈的 ticker 会一起停掉——现象是「规则装了、计数器在涨，但用户态一个包都收不到，`--queue-bypass` 把包全放了」。这个坑只会在运行时启动时出现，启动时用后台 ctx 是看不出来的。
+
 ## 3. 目录地图：想改什么去哪里
 
 | 想改的东西 | 位置 |
@@ -95,6 +166,7 @@ gh release delete v2026-09-24 --repo herta0426/AdguardHome-Mod --cleanup-tag --y
 | 鉴权与权限分级 | `internal/home/middlewares.go` |
 | 配置结构 | `internal/home/config.go`；历史迁移在 `internal/configmigrate/**` |
 | 配置参考模板 | `doc/AdGuardHome.yaml.example`（只是参考，安装不需要；由程序自己生成） |
+| SNI 阻断（自己加的功能） | `internal/snifilter/**`；配置段 `sni_filter`；生命周期在 `internal/home/dns.go` |
 | 统计接口与编号 | `internal/stats/http.go`、`internal/stats/unit.go` |
 | 过滤原因编号 | `internal/filtering/reason.go` |
 | 版本号生成 | `scripts/make/version.sh`、`Makefile` |

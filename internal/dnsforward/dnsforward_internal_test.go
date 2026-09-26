@@ -969,6 +969,107 @@ func TestNullBlockedRequest(t *testing.T) {
 	)
 }
 
+// TestStrongBlockedRequest tests that the strong blocking mode responds with
+// an empty NODATA response, since the rest of the blocking is done by the SNI
+// filter.
+func TestStrongBlockedRequest(t *testing.T) {
+	forwardConf := ServerConfig{
+		UDPListenAddrs: []*net.UDPAddr{{}},
+		TCPListenAddrs: []*net.TCPAddr{{}},
+		TLSConf:        &TLSConfig{},
+		Config: Config{
+			UpstreamMode: UpstreamModeLoadBalance,
+			EDNSClientSubnet: &EDNSClientSubnet{
+				Enabled: false,
+			},
+			ClientsContainer: EmptyClientsContainer{},
+		},
+		ServePlainDNS: true,
+	}
+	s := createTestServer(
+		t,
+		&filtering.Config{ProtectionEnabled: true, BlockingMode: filtering.BlockingModeStrong},
+		forwardConf,
+		testTLSManager,
+	)
+	startDeferStop(t, s)
+	addr := s.dnsProxy.Addr(proxy.ProtoUDP)
+
+	for _, qt := range []uint16{dns.TypeA, dns.TypeAAAA, dns.TypeHTTPS} {
+		req := dns.Msg{
+			MsgHdr: dns.MsgHdr{
+				Id:               dns.Id(),
+				RecursionDesired: true,
+			},
+			Question: []dns.Question{{
+				Name:   "NULL.example.org.",
+				Qtype:  qt,
+				Qclass: dns.ClassINET,
+			}},
+		}
+
+		reply, err := dns.Exchange(&req, addr.String())
+		require.NoErrorf(t, err, "couldn't talk to server %s: %s", addr, err)
+		assert.Equal(t, dns.RcodeSuccess, reply.Rcode)
+		assert.Emptyf(t, reply.Answer, "qtype %d", qt)
+		assert.NotEmptyf(t, reply.Ns, "no soa record for qtype %d", qt)
+	}
+}
+
+// TestValidateBlockingMode tests the validation of the blocking modes.
+func TestValidateBlockingMode(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		mode    filtering.BlockingMode
+		bIPv4   netip.Addr
+		bIPv6   netip.Addr
+		wantErr bool
+	}{{
+		name: "default",
+		mode: filtering.BlockingModeDefault,
+	}, {
+		name: "strong",
+		mode: filtering.BlockingModeStrong,
+	}, {
+		name: "nxdomain",
+		mode: filtering.BlockingModeNXDOMAIN,
+	}, {
+		name: "refused",
+		mode: filtering.BlockingModeREFUSED,
+	}, {
+		name: "null_ip",
+		mode: filtering.BlockingModeNullIP,
+	}, {
+		name:  "custom_ip",
+		mode:  filtering.BlockingModeCustomIP,
+		bIPv4: netip.MustParseAddr("0.0.0.0"),
+		bIPv6: netip.MustParseAddr("::"),
+	}, {
+		name:    "custom_ip_no_addresses",
+		mode:    filtering.BlockingModeCustomIP,
+		wantErr: true,
+	}, {
+		name:    "bad",
+		mode:    filtering.BlockingMode("bad"),
+		wantErr: true,
+	}}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateBlockingMode(tc.mode, tc.bIPv4, tc.bIPv6)
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestBlockedCustomIP(t *testing.T) {
 	rules := "||nxdomain.example.org^\n||NULL.example.org^\n127.0.0.1	host.example.org\n@@||whitelist.example.org^\n||127.0.0.255\n"
 	filters := []filtering.Filter{{

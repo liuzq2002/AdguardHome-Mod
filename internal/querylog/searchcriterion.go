@@ -67,6 +67,8 @@ var reasonCodes = [...]string{
 	filtering.Rewritten:            "9",
 	filtering.RewrittenAutoHosts:   "10",
 	filtering.RewrittenRule:        "11",
+	filtering.FilteredSNI:          "12",
+	filtering.NotFilteredSNI:       "13",
 }
 
 // searchCriterion is a search criterion that is used to match a record.
@@ -253,7 +255,7 @@ func reasonIsRewrite(r filtering.Reason) (ok bool) {
 func (c *searchCriterion) isFilteredWithReason(reason filtering.Reason) (matched bool) {
 	switch c.value {
 	case filteringStatusBlocked:
-		return reason == filtering.FilteredBlockList
+		return reason == filtering.FilteredBlockList || reason == filtering.FilteredSNI
 	case filteringStatusBlockedParental:
 		return reason == filtering.FilteredParental
 	case filteringStatusBlockedSafebrowsing:
@@ -269,5 +271,6 @@ func (c *searchCriterion) isFilteredWithReason(reason filtering.Reason) (matched
 //   - [filtering.NotFilteredAllowList]
 func reasonIsRuleList(r filtering.Reason) (ok bool) {
 	return r == filtering.FilteredBlockList ||
+		r == filtering.FilteredSNI ||
 		r == filtering.NotFilteredAllowList
 }

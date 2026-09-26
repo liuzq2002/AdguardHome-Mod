@@ -133,7 +133,8 @@ const Row = memo(
             const formattedElapsedMs = formatElapsedMs(elapsedMs, t);
             const isFiltered = checkFiltered(reason);
 
-            const isBlocked = reason === FILTERED_STATUS.FILTERED_BLACK_LIST;
+            const isBlocked =
+                reason === FILTERED_STATUS.FILTERED_BLACK_LIST || reason === FILTERED_STATUS.FILTERED_SNI;
 
             const buttonType = isFiltered ? BLOCK_ACTIONS.UNBLOCK : BLOCK_ACTIONS.BLOCK;
             const onToggleBlock = () => {
