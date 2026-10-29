@@ -120,8 +120,8 @@ gh release delete v2026-09-24 --repo herta0426/AdguardHome-Mod --cleanup-tag --y
 sni_filter:
   queue_num: 7          # 别用 0；脚本也从这里读队列号
   ports: [443, 8443]    # 用于快速短路：只有目的端口在列表里的包才进入解析
-  uids: []              # 描述性字段；例如 ["10000-19999"]，空表示所有进程
-  drop_quic: false      # 描述性字段；打开则由脚本 REJECT UDP 443，逼 HTTP/3 回退 TCP
+  uids: []              # 描述性字段；例如 ["10000-19999"]，空表示所有进程；启动时 warn 提示不生效
+  drop_quic: false      # 描述性字段；打开则由脚本 REJECT UDP 443，逼 HTTP/3 回退 TCP；启动时同样 warn
 ```
 
 `filtering.blocking_mode: strong` 时上面这一段自动生效；切成别的模式则把队列停掉。
@@ -142,10 +142,12 @@ sni_filter:
 
 **已知限制与坑。**
 
-- 内核必须支持 `xt_connbytes` 与 `NFQUEUE`（nft 后端也行）。厂商内核可能裁剪，真机上先跑一条 `iptables -t filter -I OUTPUT -p tcp --dport 443 -j NFQUEUE --queue-num 7 --queue-bypass` 验证。
+- 内核必须支持 `NFQUEUE`（nft 后端也行）；脚本若还用了 `xt_connbytes`、`xt_owner`、`xt_multiport`，厂商内核可能裁剪。真机上先跑一条 `iptables -t filter -I OUTPUT -p tcp --dport 443 -j NFQUEUE --queue-num 7 --queue-bypass` 验证，再用 `iptables -t filter -L AGH_SNI -vn` 看计数器是否真的在涨。
+- **规则不要排除 SYN**：`--tcp-flags SYN,FIN,RST NONE` 会把 SYN 挡在队列外，用户态只能乐观同步起始序号。如果一个连接的第一个入队段不是 ClientHello 开头（恶意 App 可以故意这么做），这条连接就不会被跟踪、也不会被拦。把 SYN 送进队列（只继续排除纯 ACK）即可让 `nextSeq` 从 SYN 的 seq+1 精确初始化。
 - 注入的 RST 源地址是远端 IP，靠本机 IP 栈绕回本地 socket；`net.ipv4.conf.*.rp_filter` 若是**严格模式（1）**，这个包会被丢掉，效果退化成「连接一直挂着」（仍然拦截，只是慢）。部分 ROM 要留意。
-- HTTP/3（QUIC）的 SNI 是加密的，拦不到，只能 `drop_quic: true` 逼回退 TCP。ECH 普及后这条路也会静默失效。
-- 只看进程 UID、不看客户端 IP：手机上的应用都在同一台机器上，所以**按客户端区分的过滤规则在 SNI 层不生效**，只按全局规则判定（`setts.ProtectionEnabled` 恒为真）。
+- HTTP/3（QUIC）的 SNI 是加密的，拦不到，只能靠**模块脚本**对 UDP/443 做 REJECT 逼回退 TCP。`sni_filter.drop_quic` 只是描述性字段：AdGuard Home 不安装任何规则，配了它也不改变本机行为（启动时会 warn 提示）。模拟器（MuMu 等）上若 UDP/443 没被拒，App 会一直走 HTTP/3，表现就是“完全没有 SNI 记录”。ECH 普及后这条路同样会静默失效。
+- 只看进程 UID、不看客户端 IP：手机上的应用都在同一台机器上，所以**按客户端区分的过滤规则在 SNI 层不生效**，只按全局规则判定（`checkHost` 里把 `setts.ProtectionEnabled` 置为真，让规则引擎不因暂停而短路）。
+- **暂停保护会影响 SNI**：暂停时队列不重建，只把新状态推给过滤器——连接照旧解析、照旧写 SNI 查询日志，但不发 RST、不 DROP；恢复后已判决为拦截的连接立即重新 DROP。状态由 `syncSNIFilter` 通过 `Filter.SetProtectionStatus` 推送，到期时间每包再比一次，不依赖下一次 DNS 查询。
 - **SNI 走查询日志，不走主日志**：每条解析出 SNI 的连接都会写进查询日志（`internal/snifilter/snifilter.go` 的 `logConnection`），域名就是 SNI。原因换成 SNI 专用的两个值，好把 TLS 连接与 DNS 请求分开：被拦的是 `filtering.FilteredSNI`（界面显示「已阻止（SNI）」，仍归入「已阻止」筛选），放行的是 `filtering.NotFilteredSNI`（显示「已处理（SNI）」）——过滤引擎给的原因不再写进查询日志，但命中的规则照旧带上，所以「命中允许规则」的连接改看规则列而不是「允许项」筛选。SNI 记录还多一个 **`destination`**（`AddParams.Dst` → `logEntry.Dst` → `entryToJSON` 的 `destination`，前端在响应详情里渲染成一行「目标地址」）：连接的目标 IP:端口，DNS 查询没有这一维，只有 SNI 过滤能看到应用最终连到哪个地址。主日志只在启动/停止、出错误的时候写，不再逐条打印连接；RST 发不出去也只记 debug。
 - 查询日志里记的是**每条连接**（放行的也记），手机上流量大时会把查询日志刷得比较快，日志轮转要不要调（`querylog.mem_size` / `interval`）按实际用量定。
 - 队列号默认 7，和别的 NFQUEUE 使用者撞车时改 `queue_num`。
@@ -605,6 +607,14 @@ gh api -H "Accept: application/vnd.github.raw" \
 - 删接口会打断仓库外的调用方，见 2.5 节。
 - 上游同步会把删掉的平台文件与功能带回来，见第 10 节。
 - 本机跑着官方 AdGuard Home 服务（占用 3000/53），做本地验证要换端口，别去动它。
+- **崩溃了先找崩溃日志，默认路径是 `<work-dir>/crash.log`**（模块里没有 `-w`，workDir 就是可执行文件所在目录，即 `/data/adb/agh/bin`，所以默认是 `/data/adb/agh/bin/crash.log`）。路径优先级：命令行 `--crash-log <path>` > 环境变量 `AGH_CRASH_LOG` > 默认 `<work-dir>/crash.log`；解析逻辑是 `internal/home/crashpath.go` 里的纯函数 `resolveCrashLogPath`，启动时由 `Main` 算好再传给 `installCrashHandler`。要落到 `/data/adb/agh/`，在模块 `service.sh` 的启动行加 `--crash-log /data/adb/agh/crash.log`（或 `export AGH_CRASH_LOG=/data/adb/agh/crash.log`）；**不要**为此改 `-w`，那会把 querylog、统计、过滤器数据目录一起搬走。`internal/home/crash_linux.go` 在 `Main` 一开始、配置 logger 之前就把进程的 fd 2（stderr）重定向到这个文件，所以**任意 goroutine 的 panic 栈**都会落盘。文件涨到 **8 MiB** 后，下次启动时会被改名成 `<path>.1`（旧的 `.1` 被覆盖），两个文件合计最多 16 MiB；阈值从 50 MiB 降到 8 MiB，是因为栈本身只有几十 KB，而 Android 的 `/data` 空间紧张。只有 Linux 上会重定向，非 Linux 平台只有同名 stub。
+- 为什么需要这个文件：AGH 默认只把日志写 stdout——`log.file` 为空时 `configureLogger`（`internal/home/log.go`）直接 return——而模块脚本启动时没有把 stdout/stderr 重定向到任何地方，于是 runtime 打到 stderr 的 panic 栈、以及 slog 的输出，**在没有这个重定向时基本等于丢失**。排错时别只看 `logcat` 或模块自己的日志。
+- **不想产生普通日志文件、又想去掉 `dnsproxy: ...` 这类噪音**：那些行是 Go 标准库 `log` 的输出，`log.file` 为空时它默认写 stderr，于是混进了崩溃日志。把 `log.file` 配成 `discard`（等价别名 `none`，大小写不敏感，和 `syslog` 同一手法，判定见 `internal/home/log.go` 的 `isDiscardFileName`）后，`configureLogger` 会 `log.SetOutput(io.Discard)` 并直接返回：不建 lumberjack、不建文件，标准库日志被丢弃。slog 结构化日志、Warn/Error 镜像、面包屑、panic 栈**都不受影响**，崩溃日志照常工作。
+- 每条记录都是**单行 key=value**，方便 `grep` 和脚本解析：`time`（RFC3339Nano）、`tz`（`time` 用的时区名，见下条）、`version`、`channel`、`arch`、`os`、`pid`、`uptime`（进程启动到写这一行的时长）、`workdir`、`gomaxprocs`、`uid`（`0` 表示是 root 跑的）、`event`（`start` 是启动头，`panic` 是崩溃记录），崩溃记录还多一个 `panic=<恢复到的值>`（值带引号，多行内容会被转义，保证一条记录就是一行）。启动头和 panic 记录共用 `internal/home/crashheader.go` 里的同一个格式化函数，两边字段不会漂移。
+- **`time=` 的时区取决于 `TZ`，Android 上默认是 UTC（`Z`）**：AGH 只用 `time.Local` 格式化日志，而 `time.Local` 来自 `TZ` 或 `/etc/localtime`。Android 没有 `/etc/localtime`，Magisk 的 service 环境里也没有 `TZ`，于是 `time.Local` 退化成 UTC，崩溃日志头部的 `time=` 以 `Z` 结尾、同一文件里标准库 `log` 的行也是 UTC，看起来像是差了 8 小时。**这不是代码算错时区，是进程根本没有本地时区**，所以记录里额外输出 `tz=<时区名>`（`UTC` 或 `Asia/Shanghai`）以便一眼分辨。修法在模块脚本里、启动 AGH 之前加一行 `export TZ=$(getprop persist.sys.timezone)`（`main.go` 已 `import _ "time/tzdata"`，**不需要**系统装 tzdata）。启动时 `redirectStderrToCrashLog` 会调用 `logLocalTimeZoneStatus`：当 `TZ` 为空、`/etc/localtime` 不存在、且 `time.Local.String() == "UTC"` 三者同时成立时，打一条 **Warn**（文案提示设置 `TZ`，带 `tz`、`localtime_missing=true`、`reason`），并会一并镜像进崩溃日志；判定逻辑是 `internal/home/crashheader.go` 里的纯函数 `localTimeZoneStatus`。
+- **面包屑（breadcrumbs）**：`internal/home/log.go` 的 `newSlogLogger` 把每条 slog 记录格式化成一行塞进 `internal/home/logring.go` 的 **64 KiB 环形缓冲**；单条超过 1 KiB 会被截断并标记 `…truncated`，抢不到锁（`sync.Mutex.TryLock`）就丢弃并计数，**不会阻塞或拖慢日志路径**。`recoverAndLog` 先写 `=== breadcrumbs ===` 段，再写 `=== stack ===` 段。**局限：只有能被 `recover` 兜住的 panic（`Main` 那个 goroutine 的）才有面包屑**；其它 goroutine 的 panic 由 runtime 直接 abort 整个进程，只有栈，没有面包屑。
+- **Warn/Error 镜像**：`newSlogLogger` 返回的是 `internal/home/logfanout.go` 里的 `fanoutHandler`，它把同一条记录扇出到「原有的 handler + 面包屑 ringHandler + 崩溃日志 TextHandler（`Level: slog.LevelWarn`）」。所以 `crash.log` 里除了栈，还能看到崩溃前的 Warn/Error 结构化日志（形如 `time=... level=WARN msg=...`）。`log.enabled` 为 false 时 logger 是 DiscardLogger，此时不包 fanout，也不收集面包屑。
+- **副作用（重要）**：这个重定向只管「stderr 去哪」，但它**接管的是整个进程的 stderr**。模块侧原来对 stderr 的采集（`agh-self.log`、`adb logcat` 之类）因此**收不到 panic 栈**——排查 panic 必须去看 `crash.log`，别只看 logcat。此外栈、面包屑段和 Warn+ 镜像都写进同一个 fd，按行读即可，不要假设它们严格按时序排列。
 
 ## 15. 每次改动的验收清单
 
