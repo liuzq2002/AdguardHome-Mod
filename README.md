@@ -5,7 +5,9 @@
   </picture>
 </p>
 
-<h3 align="center">AdGuard Home 修改版（Mod）</h3>
+# AdGuard Home 修改版（Mod）
+
+## 近期有人用我的署名仿冒，请注意甄别（非liuzq2002 Github下载一律为仿冒）
 
 <p align="center">全网去广告与反跟踪的 DNS 服务器，为 Magisk 模块做的定制修改版。</p>
 
